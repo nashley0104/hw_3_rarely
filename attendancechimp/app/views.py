@@ -7,12 +7,14 @@ from zoneinfo import ZoneInfo
 from django.contrib.auth import login
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
-from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
+from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import render
+from django.utils import timezone
+from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from .models import InstructorProfile, StudentProfile
+from .models import Course, InstructorProfile, Lecture, QRCodeUpload, StudentProfile
 
 CDT = ZoneInfo("America/Chicago")
 
@@ -58,6 +60,28 @@ def index(request: HttpRequest) -> HttpResponse:
 def new_user(request: HttpRequest) -> HttpResponse:
     """Render the sign-up form; non-GET requests receive HTTP 405."""
     return render(request, "app/new.html")
+
+
+@require_GET
+def new_course(request: HttpRequest) -> HttpResponse:
+    """Render the instructor form used to create a course."""
+    return render(request, "app/new_course.html")
+
+
+@require_GET
+def new_lecture(request: HttpRequest) -> HttpResponse:
+    """Render the lecture form with all courses as selectable choices."""
+    return render(
+        request,
+        "app/new_lecture.html",
+        {"courses": Course.objects.order_by("name")},
+    )
+
+
+@require_GET
+def new_qr_upload(request: HttpRequest) -> HttpResponse:
+    """Render the student QR-code image upload form."""
+    return render(request, "app/new_qr_upload.html")
 
 
 def _is_student_role(raw_value: str | None) -> bool | None:
@@ -127,3 +151,138 @@ def createUser(request: HttpRequest) -> HttpResponse:
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
     status = 201 if request.path.startswith("/app/api/") else 200
     return HttpResponse("success", status=status, content_type="text/plain")
+
+
+def _instructor_for(request: HttpRequest) -> InstructorProfile | None:
+    """Return the signed-in user's instructor profile, if it exists."""
+    if not request.user.is_authenticated:
+        return None
+    try:
+        return request.user.instructor_profile
+    except InstructorProfile.DoesNotExist:
+        return None
+
+
+def _student_for(request: HttpRequest) -> StudentProfile | None:
+    """Return the signed-in user's student profile, if it exists."""
+    if not request.user.is_authenticated:
+        return None
+    try:
+        return request.user.student_profile
+    except StudentProfile.DoesNotExist:
+        return None
+
+
+def _unauthorized() -> HttpResponse:
+    """Return the status required by the HW5 role-protection contract."""
+    return HttpResponse("Unauthorized", status=401, content_type="text/plain")
+
+
+def _available_course_code(course_name: str) -> str:
+    """Build a short unique catalog code from the submitted course name."""
+    base = slugify(course_name).replace("-", "").upper() or "COURSE"
+    base = base[:20]
+    candidate = base
+    suffix = 2
+    while Course.objects.filter(course_code=candidate).exists():
+        suffix_text = str(suffix)
+        candidate = f"{base[: 20 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return candidate
+
+
+@csrf_exempt
+@require_POST
+def createCourse(request: HttpRequest) -> HttpResponse:
+    """Create a course for an authenticated instructor."""
+    instructor = _instructor_for(request)
+    if instructor is None:
+        return _unauthorized()
+
+    course_name = request.POST.get("course-name", "").strip()
+    start_time = request.POST.get("start-time", "").strip()
+    end_time = request.POST.get("end-time", "").strip()
+    day_fields = (
+        ("day-mon", "Mon"),
+        ("day-tue", "Tue"),
+        ("day-wed", "Wed"),
+        ("day-thu", "Thu"),
+        ("day-fri", "Fri"),
+    )
+    selected_days = [label for field, label in day_fields if request.POST.get(field)]
+
+    if not course_name or not start_time or not end_time or not selected_days:
+        return HttpResponseBadRequest(
+            "course-name, start-time, end-time, and at least one weekday are required."
+        )
+
+    try:
+        parsed_start = datetime.strptime(start_time, "%H:%M")
+        parsed_end = datetime.strptime(end_time, "%H:%M")
+    except ValueError:
+        return HttpResponseBadRequest("start-time and end-time must use HH:MM.")
+    if parsed_start >= parsed_end:
+        return HttpResponseBadRequest("end-time must be later than start-time.")
+    if Course.objects.filter(name=course_name).exists():
+        return HttpResponseBadRequest("A course with that name already exists.")
+
+    Course.objects.create(
+        course_code=_available_course_code(course_name),
+        name=course_name,
+        instructor=instructor,
+        meeting_schedule=f"{'/'.join(selected_days)} {start_time}-{end_time}",
+    )
+    return HttpResponse("success", status=200, content_type="text/plain")
+
+
+@csrf_exempt
+@require_POST
+def createLecture(request: HttpRequest) -> HttpResponse:
+    """Create a current-time lecture for a course as an instructor."""
+    if _instructor_for(request) is None:
+        return _unauthorized()
+
+    course_name = request.POST.get("choice", "").strip()
+    if not course_name:
+        return HttpResponseBadRequest("choice is required.")
+    course = Course.objects.filter(name=course_name).order_by("pk").first()
+    if course is None:
+        return HttpResponseBadRequest("The selected course does not exist.")
+
+    Lecture.objects.create(course=course, date=timezone.now(), is_open=True)
+    return HttpResponse("success", status=200, content_type="text/plain")
+
+
+@csrf_exempt
+@require_POST
+def createQRCodeUpload(request: HttpRequest) -> HttpResponse:
+    """Store an uploaded QR-code image for an authenticated student."""
+    student = _student_for(request)
+    if student is None:
+        return _unauthorized()
+
+    image_upload = request.FILES.get("imageUpload")
+    if image_upload is None:
+        return HttpResponseBadRequest("imageUpload is required.")
+
+    QRCodeUpload.objects.create(student=student, image=image_upload)
+    return HttpResponse("success", status=200, content_type="text/plain")
+
+
+@csrf_exempt
+@require_GET
+def dumpUploads(request: HttpRequest) -> JsonResponse | HttpResponse:
+    """Return student usernames and upload timestamps to instructors as JSON."""
+    if _instructor_for(request) is None:
+        return _unauthorized()
+
+    data = [
+        {
+            "username": upload.student.user.username,
+            "upload_time": timezone.localtime(upload.uploaded_at).isoformat(),
+        }
+        for upload in QRCodeUpload.objects.select_related("student__user").order_by(
+            "uploaded_at"
+        )
+    ]
+    return JsonResponse(data, safe=False)

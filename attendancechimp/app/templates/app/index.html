@@ -66,6 +66,14 @@
 
     <nav aria-label="Account actions">
         {% if current_user.is_authenticated %}
+            {% if current_user.instructor_profile %}
+                <a href="{% url 'new_course' %}">New course</a>
+                <a href="{% url 'new_lecture' %}">New lecture</a>
+                <a href="{% url 'dump_uploads' %}">View uploads JSON</a>
+            {% endif %}
+            {% if current_user.student_profile %}
+                <a href="{% url 'new_qr_upload' %}">Upload QR code</a>
+            {% endif %}
             <form method="post" action="{% url 'logout' %}">
                 {% csrf_token %}
                 <button type="submit">Log out</button>
