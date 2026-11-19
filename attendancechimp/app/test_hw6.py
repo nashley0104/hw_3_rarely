@@ -87,6 +87,24 @@ class HomeworkSixTests(TestCase):
         )
         self.assertEqual(getUploadsForCourse("DATA13600"), [valid])
 
+    def test_helper_filters_multiple_uploads_for_the_same_lecture(self):
+        lecture = Lecture.objects.create(
+            course=self.course,
+            date=self._chicago_datetime(2024, 11, 4, 10, 0),
+            is_open=True,
+        )
+        valid = QRCodeUpload.objects.create(student=self.student, lecture=lecture)
+        too_early = QRCodeUpload.objects.create(student=self.student, lecture=lecture)
+        QRCodeUpload.objects.filter(pk=valid.pk).update(
+            upload_time=self._chicago_datetime(2024, 11, 4, 10, 30),
+        )
+        QRCodeUpload.objects.filter(pk=too_early.pk).update(
+            upload_time=self._chicago_datetime(2024, 11, 4, 8, 0),
+        )
+        valid.refresh_from_db()
+
+        self.assertEqual(getUploadsForCourse("DATA13600"), [valid])
+
     def test_helper_returns_empty_list_for_unknown_course(self):
         self.assertEqual(getUploadsForCourse("DOES-NOT-EXIST"), [])
 

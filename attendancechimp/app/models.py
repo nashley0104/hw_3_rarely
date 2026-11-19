@@ -8,7 +8,7 @@ course, and every QR-code upload identifies its student and optional lecture.
 
 Database constraints encode the rules that are cheapest and safest to enforce
 centrally: a student can enroll in a course only once, a lecture has a unique
-unpredictable QR value, and a student cannot submit twice for the same lecture.
+unpredictable QR value, and every upload remains available for validation.
 """
 
 import uuid
@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
 from django.db import models
-from django.db.models import Q
 from django.utils import timezone
 
 
@@ -255,13 +254,6 @@ class QRCodeUpload(models.Model):
 
     class Meta:
         ordering = ["-uploaded_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["student", "lecture"],
-                condition=Q(lecture__isnull=False),
-                name="one_upload_per_student_lecture",
-            )
-        ]
 
     def matches_lecture(self):
         """Return whether the decoded QR value matches the linked lecture."""

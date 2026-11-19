@@ -58,9 +58,15 @@ class AttendanceChimpModelTests(TestCase):
         )
         self.assertTrue(upload.matches_lecture())
 
-    def test_second_upload_for_same_lecture_is_rejected(self):
+    def test_multiple_uploads_for_same_lecture_are_preserved(self):
         QRCodeUpload.objects.create(student=self.student, lecture=self.lecture)
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            QRCodeUpload.objects.create(student=self.student, lecture=self.lecture)
+        QRCodeUpload.objects.create(student=self.student, lecture=self.lecture)
+        self.assertEqual(
+            QRCodeUpload.objects.filter(
+                student=self.student,
+                lecture=self.lecture,
+            ).count(),
+            2,
+        )
 
 
