@@ -12,10 +12,16 @@ unpredictable QR value, and a student cannot submit twice for the same lecture.
 """
 
 import uuid
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
+
+
+CHICAGO_TIME_ZONE = ZoneInfo("America/Chicago")
 
 
 class InstructorProfile(models.Model):
@@ -61,6 +67,18 @@ class StudentProfile(models.Model):
         return f"{self.user.get_full_name() or self.user.username} ({self.student_id})"
 
 
+def _field_alias(field_name):
+    """Create a read/write property that aliases a model field."""
+
+    def getter(instance):
+        return getattr(instance, field_name)
+
+    def setter(instance, value):
+        setattr(instance, field_name, value)
+
+    return property(getter, setter)
+
+
 class Course(models.Model):
     """A course section taught by exactly one instructor.
 
@@ -68,14 +86,29 @@ class Course(models.Model):
     assignment models storage rather than calendar recurrence behavior.
     """
 
-    course_code = models.CharField(max_length=20, unique=True)
-    name = models.CharField(max_length=200)
+    # ``course`` is the unique course-number field used by HW6 (for example,
+    # DATA13600). ``course_code`` is retained for compatibility with HW3-HW5.
+    course = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    course_code = models.CharField(
+        max_length=20,
+        unique=True,
+        null=True,
+        blank=True,
+    )
+    name = models.CharField(max_length=200, blank=True)
     instructor = models.ForeignKey(
         InstructorProfile,
         on_delete=models.PROTECT,
         related_name="courses",
     )
-    meeting_schedule = models.CharField(max_length=200)
+    meeting_schedule = models.CharField(max_length=200, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    mon = models.BooleanField(default=False)
+    tue = models.BooleanField(default=False)
+    wed = models.BooleanField(default=False)
+    thu = models.BooleanField(default=False)
+    fri = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     students = models.ManyToManyField(
         StudentProfile,
@@ -86,9 +119,45 @@ class Course(models.Model):
     class Meta:
         ordering = ["course_code"]
 
+    def meets_on_day(self, weekday):
+        """Return whether the course meets on a given weekday.
+
+        ``weekday`` may be the integer returned by ``datetime.weekday()`` or a
+        weekday name/abbreviation. Weekends always return ``False``.
+        """
+        if isinstance(weekday, str):
+            normalized = weekday.strip().lower()[:3]
+            weekday = {
+                "mon": 0,
+                "tue": 1,
+                "wed": 2,
+                "thu": 3,
+                "fri": 4,
+                "sat": 5,
+                "sun": 6,
+            }.get(normalized)
+        fields = ("mon", "tue", "wed", "thu", "fri")
+        if not isinstance(weekday, int) or weekday not in range(len(fields)):
+            return False
+        return bool(getattr(self, fields[weekday]))
+
+    # Read/write aliases make the schedule easy to use with either full weekday
+    # names or the short names used by the HW5 form fields.
+    monday = _field_alias("mon")
+    tuesday = _field_alias("tue")
+    wednesday = _field_alias("wed")
+    thursday = _field_alias("thu")
+    friday = _field_alias("fri")
+    day_mon = _field_alias("mon")
+    day_tue = _field_alias("tue")
+    day_wed = _field_alias("wed")
+    day_thu = _field_alias("thu")
+    day_fri = _field_alias("fri")
+
     def __str__(self):
         """Return the catalog-style course label."""
-        return f"{self.course_code}: {self.name}"
+        number = self.course or self.course_code or "Unnumbered course"
+        return f"{number}: {self.name}" if self.name else number
 
 
 class Enrollment(models.Model):
@@ -179,6 +248,9 @@ class QRCodeUpload(models.Model):
     submitted_qr_identifier = models.UUIDField(null=True, blank=True)
     image_digest = models.CharField(max_length=64, unique=True, null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    # Some course implementations call the timestamp ``upload_time``. New
+    # browser uploads fall back to the existing ``uploaded_at`` field.
+    upload_time = models.DateTimeField(null=True, blank=True)
     is_valid = models.BooleanField(default=False)
 
     class Meta:
@@ -199,7 +271,64 @@ class QRCodeUpload(models.Model):
             and self.submitted_qr_identifier == self.lecture.qr_identifier
         )
 
+    def effective_upload_time(self):
+        """Return an explicitly assigned upload time or the creation time."""
+        return self.upload_time or self.uploaded_at
+
     def __str__(self):
         """Identify the student and target lecture, when known."""
         target = str(self.lecture) if self.lecture_id else "unmatched lecture"
         return f"Upload from {self.student} for {target}"
+
+
+def _time_value(value):
+    """Normalize a model time value or HH:MM string to ``datetime.time``."""
+    if isinstance(value, time):
+        return value.replace(tzinfo=None)
+    if isinstance(value, str):
+        for time_format in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(value, time_format).time()
+            except ValueError:
+                continue
+    return None
+
+
+def getUploadsForCourse(course):
+    """Return uploads made during the named course's Chicago meeting time.
+
+    Upload timestamps are stored in UTC by Django. Each timestamp is converted
+    to America/Chicago before checking its weekday and time-of-day.
+    """
+    course_number = str(course).strip() if course is not None else ""
+    if not course_number:
+        return []
+
+    course_obj = (
+        Course.objects.filter(course=course_number).first()
+        or Course.objects.filter(course_code=course_number).first()
+        or Course.objects.filter(name=course_number).first()
+    )
+    if course_obj is None:
+        return []
+
+    start_time = _time_value(course_obj.start_time)
+    end_time = _time_value(course_obj.end_time)
+    if start_time is None or end_time is None:
+        return []
+
+    valid_uploads = []
+    uploads = QRCodeUpload.objects.filter(lecture__course=course_obj).select_related(
+        "student__user",
+        "lecture__course",
+    )
+    for upload in uploads:
+        local_timestamp = timezone.localtime(
+            upload.effective_upload_time(),
+            CHICAGO_TIME_ZONE,
+        )
+        if not course_obj.meets_on_day(local_timestamp.weekday()):
+            continue
+        if start_time <= local_timestamp.time().replace(tzinfo=None) <= end_time:
+            valid_uploads.append(upload)
+    return valid_uploads

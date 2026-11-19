@@ -14,7 +14,14 @@ from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from .models import Course, InstructorProfile, Lecture, QRCodeUpload, StudentProfile
+from .models import (
+    Course,
+    InstructorProfile,
+    Lecture,
+    QRCodeUpload,
+    StudentProfile,
+    getUploadsForCourse,
+)
 
 CDT = ZoneInfo("America/Chicago")
 
@@ -210,6 +217,10 @@ def createCourse(request: HttpRequest) -> HttpResponse:
         ("day-fri", "Fri"),
     )
     selected_days = [label for field, label in day_fields if request.POST.get(field)]
+    meeting_days = {
+        field.removeprefix("day-"): bool(request.POST.get(field))
+        for field, _label in day_fields
+    }
 
     if not course_name or not start_time or not end_time or not selected_days:
         return HttpResponseBadRequest(
@@ -223,14 +234,25 @@ def createCourse(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("start-time and end-time must use HH:MM.")
     if parsed_start >= parsed_end:
         return HttpResponseBadRequest("end-time must be later than start-time.")
-    if Course.objects.filter(name=course_name).exists():
+    if (
+        Course.objects.filter(course=course_name).exists()
+        or Course.objects.filter(name=course_name).exists()
+    ):
         return HttpResponseBadRequest("A course with that name already exists.")
 
     Course.objects.create(
+        course=course_name,
         course_code=_available_course_code(course_name),
         name=course_name,
         instructor=instructor,
         meeting_schedule=f"{'/'.join(selected_days)} {start_time}-{end_time}",
+        start_time=parsed_start.time(),
+        end_time=parsed_end.time(),
+        mon=meeting_days["mon"],
+        tue=meeting_days["tue"],
+        wed=meeting_days["wed"],
+        thu=meeting_days["thu"],
+        fri=meeting_days["fri"],
     )
     return HttpResponse("success", status=200, content_type="text/plain")
 
@@ -284,5 +306,32 @@ def dumpUploads(request: HttpRequest) -> JsonResponse | HttpResponse:
         for upload in QRCodeUpload.objects.select_related("student__user").order_by(
             "uploaded_at"
         )
+    ]
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+@require_GET
+def getUploads(request: HttpRequest) -> JsonResponse | HttpResponse:
+    """Return schedule-valid uploads for one course to an instructor."""
+    if _instructor_for(request) is None:
+        return _unauthorized()
+
+    course_number = request.GET.get("course", "").strip()
+    if not course_number:
+        return JsonResponse(
+            {"error": "Missing course parameter"},
+            status=400,
+        )
+
+    data = [
+        {
+            "username": upload.student.user.username,
+            "upload_time": timezone.localtime(
+                upload.effective_upload_time(),
+                CDT,
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        for upload in getUploadsForCourse(course_number)
     ]
     return JsonResponse(data, safe=False)

@@ -30,4 +30,7 @@ urlpatterns = [
     path("createQRCodeUpload/", views.createQRCodeUpload),
     path("dumpUploads", views.dumpUploads, name="dump_uploads"),
     path("dumpUploads/", views.dumpUploads),
+    # HW6 schedule-valid uploads endpoint
+    path("getUploads", views.getUploads, name="get_uploads"),
+    path("getUploads/", views.getUploads),
 ]
